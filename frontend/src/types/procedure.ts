@@ -43,6 +43,20 @@ export const STEP_FIELD_MAP: Record<
 /** 工序节点状态 */
 export type ProcedureState = 'pending' | 'done' | 'rolledback';
 
+/** 实际领用的材料批次与数量（录入时选择，随工序一次确认） */
+export interface ProcedureMaterial {
+  lotId: string;
+  /** 提交瞬间快照批号/名称，供时间线在批次被删后仍可展示 */
+  lotNo: string;
+  name: string;
+  unit: string;
+  qty: number;
+  /** 对应领用记录 id，回退时按它定位退回 */
+  issueId: string;
+  /** 回退退料后回填 */
+  returnedAt?: number;
+}
+
 /** 修复工序 */
 export interface PrepProcedure {
   id: string;
@@ -72,6 +86,13 @@ export interface PrepProcedure {
   startedAt: number;
   state: ProcedureState;
   finishedAt?: number;
+  /** 实际领用材料（按批次/数量扣减，回退时据此退料） */
+  materials: ProcedureMaterial[];
+  /**
+   * 乐观锁版本：保存/完成/回退都带回打开页面时的版本，
+   * 工序在别处被改动后旧版本立即失效，整笔提交不写入。
+   */
+  version: number;
 }
 
-export type PrepProcedureDraft = Omit<PrepProcedure, 'id'>;
+export type PrepProcedureDraft = Omit<PrepProcedure, 'id' | 'version'>;

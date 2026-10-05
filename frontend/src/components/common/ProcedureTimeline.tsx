@@ -13,12 +13,16 @@ import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import RadioButtonUncheckedIcon from '@mui/icons-material/RadioButtonUnchecked';
 import UndoIcon from '@mui/icons-material/Undo';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import { ConflictError } from '../../utils/occ';
+import { ConflictPanel } from './ConflictPanel';
 import type { PrepProcedure } from '../../types/procedure';
 
 export interface ProcedureTimelineProps {
   items: PrepProcedure[];
-  onFinish?: (id: string) => void;
-  onRollback?: (id: string) => void;
+  /** 完成节点（收到的 node 带打开页面时的版本） */
+  onFinish?: (node: PrepProcedure) => Promise<void> | void;
+  /** 回退节点并退料（收到的 node 带打开页面时的版本） */
+  onRollback?: (node: PrepProcedure) => Promise<void> | void;
   onOpenPhoto?: (procedureId: string) => void;
 }
 
@@ -30,11 +34,16 @@ function fmtTime(ts?: number): string {
 }
 
 /**
- * 纵向工序节点流：步骤图标、状态、耗时、环境参数折叠区。
+ * 纵向工序节点流：步骤图标、状态、耗时、环境参数、材料领用/退料折叠区。
  * 被标本详情页、工序录入页消费。
+ *
+ * 完成/回退均把带版本的整个节点交回上层；若上层事务报冲突，
+ * 在节点就地列出差异，可用最新版本重试（时间线由上层缓存刷新后显示结果）。
  */
 export function ProcedureTimeline({ items, onFinish, onRollback, onOpenPhoto }: ProcedureTimelineProps) {
   const [expanded, setExpanded] = useState<string | null>(items[0]?.id ?? null);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [conflict, setConflict] = useState<{ id: string; diffs: ConflictError['diffs'] } | null>(null);
 
   if (items.length === 0) {
     return (
@@ -46,18 +55,51 @@ export function ProcedureTimeline({ items, onFinish, onRollback, onOpenPhoto }: 
     );
   }
 
+  const runAction = async (node: PrepProcedure, action: (n: PrepProcedure) => Promise<void> | void) => {
+    setBusyId(node.id);
+    setConflict(null);
+    try {
+      await action(node);
+      setExpanded((cur) => cur);
+    } catch (err) {
+      if (err instanceof ConflictError) {
+        setConflict({ id: node.id, diffs: err.diffs });
+      } else {
+        setConflict({
+          id: node.id,
+          diffs: [
+            {
+              objectLabel: '操作',
+              objectKey: `#${node.seq}`,
+              expectedVersion: node.version,
+              actualVersion: null,
+              changes: [],
+              reason: err instanceof Error ? err.message : '操作失败，请重试',
+            },
+          ],
+        });
+      }
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   return (
     <Stack spacing={1} data-testid="procedure-timeline">
       {items.map((node, index) => {
         const isDone = node.state === 'done';
+        const isRolledback = node.state === 'rolledback';
         const open = expanded === node.id;
+        const activeMaterials = node.materials.filter((m) => !m.returnedAt);
+        const returnedMaterials = node.materials.filter((m) => m.returnedAt);
+        const nodeConflict = conflict?.id === node.id ? conflict.diffs : [];
         return (
           <Box key={node.id} sx={{ display: 'flex', gap: 1.5 }}>
             <Stack alignItems="center" sx={{ pt: 0.5 }}>
               {isDone ? (
                 <CheckCircleIcon color="success" fontSize="small" />
               ) : (
-                <RadioButtonUncheckedIcon color={node.state === 'rolledback' ? 'error' : 'disabled'} fontSize="small" />
+                <RadioButtonUncheckedIcon color={isRolledback ? 'error' : 'disabled'} fontSize="small" />
               )}
               {index < items.length - 1 ? (
                 <Box sx={{ flex: 1, width: '2px', minHeight: 32, bgcolor: 'divider', my: 0.5 }} />
@@ -71,20 +113,43 @@ export function ProcedureTimeline({ items, onFinish, onRollback, onOpenPhoto }: 
                 </Typography>
                 <Chip
                   size="small"
-                  label={node.state === 'done' ? '已完成' : node.state === 'rolledback' ? '已回退' : '待办'}
-                  color={isDone ? 'success' : node.state === 'rolledback' ? 'error' : 'default'}
+                  label={isDone ? '已完成' : isRolledback ? '已回退' : '待办'}
+                  color={isDone ? 'success' : isRolledback ? 'error' : 'default'}
                 />
+                {node.materials.length > 0 ? (
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    label={
+                      returnedMaterials.length === 0
+                        ? `领材 ${node.materials.length} 批`
+                        : `退材 ${returnedMaterials.length}/${node.materials.length} 批`
+                    }
+                    color={returnedMaterials.length > 0 ? 'warning' : 'default'}
+                  />
+                ) : null}
                 <Typography variant="caption" color="text.secondary">
                   耗时 {node.durationMin} min · 责任人 {node.operator}
                 </Typography>
                 <Box sx={{ flex: 1 }} />
                 {!isDone && onFinish ? (
-                  <Button size="small" variant="contained" onClick={() => onFinish(node.id)}>
-                    完成节点
+                  <Button
+                    size="small"
+                    variant="contained"
+                    disabled={busyId === node.id}
+                    onClick={() => runAction(node, onFinish)}
+                  >
+                    {busyId === node.id ? '确认中…' : '完成节点'}
                   </Button>
                 ) : null}
                 {isDone && onRollback ? (
-                  <Button size="small" color="warning" startIcon={<UndoIcon />} onClick={() => onRollback(node.id)}>
+                  <Button
+                    size="small"
+                    color="warning"
+                    startIcon={<UndoIcon />}
+                    disabled={busyId === node.id}
+                    onClick={() => runAction(node, onRollback)}
+                  >
                     回退节点
                   </Button>
                 ) : null}
@@ -97,6 +162,24 @@ export function ProcedureTimeline({ items, onFinish, onRollback, onOpenPhoto }: 
                   </IconButton>
                 </Tooltip>
               </Stack>
+
+              {nodeConflict.length > 0 ? (
+                <Box sx={{ mt: 1 }}>
+                  <ConflictPanel
+                    diffs={nodeConflict}
+                    retryLabel={isRolledback ? '用最新版本重试完成' : '用最新版本重试'}
+                    onRetryLatest={() => {
+                      // items 已随跨页广播刷新，这里取该节点最新版本重放同一动作
+                      const latest = items.find((it) => it.id === node.id);
+                      if (!latest) return;
+                      if (latest.state === 'done' && onRollback) void runAction(latest, onRollback);
+                      else if (latest.state !== 'done' && onFinish) void runAction(latest, onFinish);
+                    }}
+                    onDismiss={() => setConflict(null)}
+                  />
+                </Box>
+              ) : null}
+
               <Collapse in={open} unmountOnExit>
                 <Divider sx={{ my: 1 }} />
                 <Stack direction="row" spacing={2} flexWrap="wrap" rowGap={0.5}>
@@ -120,6 +203,28 @@ export function ProcedureTimeline({ items, onFinish, onRollback, onOpenPhoto }: 
                     </Button>
                   ) : null}
                 </Stack>
+
+                {node.materials.length > 0 ? (
+                  <Box sx={{ mt: 1 }}>
+                    <Typography variant="body2" fontWeight={700}>
+                      领用材料（回退时按记录退回批次）
+                    </Typography>
+                    <Stack spacing={0.5} sx={{ mt: 0.5 }}>
+                      {activeMaterials.map((material) => (
+                        <Typography key={material.issueId} variant="body2" color="text.secondary">
+                          · {material.name}（批号 {material.lotNo}）领 {material.qty} {material.unit}
+                          {isRolledback ? ' · 待核对退料' : ''}
+                        </Typography>
+                      ))}
+                      {returnedMaterials.map((material) => (
+                        <Typography key={material.issueId} variant="body2" color="warning.main">
+                          · {material.name}（批号 {material.lotNo}）已退回 {material.qty} {material.unit}
+                          {material.returnedAt ? `（${fmtTime(material.returnedAt)}）` : ''}
+                        </Typography>
+                      ))}
+                    </Stack>
+                  </Box>
+                ) : null}
               </Collapse>
             </Paper>
           </Box>

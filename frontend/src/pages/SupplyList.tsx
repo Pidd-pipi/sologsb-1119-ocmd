@@ -22,6 +22,8 @@ import AddIcon from '@mui/icons-material/Add';
 import { useSupplyStore } from '../stores/supplyStore';
 import { useSpecimenStore } from '../stores/specimenStore';
 import { MeasureField } from '../components/common/MeasureField';
+import { ConflictPanel } from '../components/common/ConflictPanel';
+import { ConflictError, type VersionDiff } from '../utils/occ';
 import { SUPPLY_KINDS, isLowStock, shelfLifeLeftDays, type SupplyKind, type SupplyLot, type SupplyLotDraft } from '../types/supply';
 
 const EMPTY_DRAFT: SupplyLotDraft = {
@@ -51,6 +53,8 @@ export default function SupplyList() {
   const [issueQty, setIssueQty] = useState(1);
   const [issueOperator, setIssueOperator] = useState('');
   const [issueSpecimen, setIssueSpecimen] = useState('');
+  const [issueConflicts, setIssueConflicts] = useState<VersionDiff[]>([]);
+  const [issueBusy, setIssueBusy] = useState(false);
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
 
@@ -91,16 +95,29 @@ export default function SupplyList() {
       setError('领用人必填');
       return;
     }
-    await issue(issueTarget.id, {
-      qty: issueQty,
-      operator: issueOperator.trim(),
-      specimenNo: issueSpecimen || '未关联标本',
-    });
-    setIssueTarget(null);
-    setIssueQty(1);
-    setIssueOperator('');
-    setError('');
-    setToast('领用已登记');
+    setIssueBusy(true);
+    setIssueConflicts([]);
+    try {
+      // issueTarget 是打开领用弹窗时的批次快照（含 version），事务内再校验
+      await issue(issueTarget, {
+        qty: issueQty,
+        operator: issueOperator.trim(),
+        specimenNo: issueSpecimen || '未关联标本',
+      });
+      setIssueTarget(null);
+      setIssueQty(1);
+      setIssueOperator('');
+      setError('');
+      setToast('领用已登记');
+    } catch (err) {
+      if (err instanceof ConflictError) {
+        setIssueConflicts(err.diffs);
+      } else {
+        setError(err instanceof Error ? err.message : '领用失败，请重试');
+      }
+    } finally {
+      setIssueBusy(false);
+    }
   };
 
   const lowCount = lots.filter(isLowStock).length;
@@ -201,7 +218,7 @@ export default function SupplyList() {
                       <TableCell>
                         {lot.issues.length === 0
                           ? '—'
-                          : `${lot.issues[0].operator} 领 ${lot.issues[0].qty} ${lot.unit}（${lot.issues[0].specimenNo}）`}
+                          : `${lot.issues[0].operator} 领 ${lot.issues[0].qty} ${lot.unit}（${lot.issues[0].specimenNo}）${lot.issues[0].returnedAt ? ' · 已退回' : ''}`}
                       </TableCell>
                       <TableCell align="right">
                         <Button
@@ -210,6 +227,7 @@ export default function SupplyList() {
                           onClick={() => {
                             setIssueTarget(lot);
                             setIssueQty(1);
+                            setIssueConflicts([]);
                             setError('');
                           }}
                         >
@@ -229,7 +247,12 @@ export default function SupplyList() {
                 .map((r) => (
                   <Typography key={r.id} variant="caption" color="text.secondary">
                     批号 {r.lotNo} 的领用明细：
-                    {r.issues.map((i) => `${i.operator} ${i.qty}${r.unit}→${i.specimenNo}`).join('；')}
+                    {r.issues
+                      .map(
+                        (i) =>
+                          `${i.operator} ${i.qty}${r.unit}→${i.specimenNo}${i.returnedAt ? '（已退回）' : ''}`,
+                      )
+                      .join('；')}
                   </Typography>
                 ))}
             </Stack>
@@ -341,9 +364,23 @@ export default function SupplyList() {
         <DialogContent dividers>
           <Stack spacing={1.5} sx={{ mt: 0.5 }}>
             {error ? <Alert severity="error">{error}</Alert> : null}
+            {issueConflicts.length > 0 ? (
+              <ConflictPanel
+                diffs={issueConflicts}
+                testid="issue-conflict"
+                retryLabel="用最新库存重试"
+                onRetryLatest={() => {
+                  // 弹窗批次基线更新为最新，表单数量/领用人保留
+                  const latest = lots.find((lot) => lot.id === issueTarget?.id);
+                  if (latest) setIssueTarget(latest);
+                  setIssueConflicts([]);
+                }}
+                onDismiss={() => setIssueConflicts([])}
+              />
+            ) : null}
             {issueTarget ? (
               <Typography variant="body2" color="text.secondary">
-                批号 {issueTarget.lotNo} · 现存 {issueTarget.qty} {issueTarget.unit}
+                批号 {issueTarget.lotNo} · 基线在库 {issueTarget.qty} {issueTarget.unit}（v{issueTarget.version}）
               </Typography>
             ) : null}
             <MeasureField
@@ -380,8 +417,8 @@ export default function SupplyList() {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setIssueTarget(null)}>取消</Button>
-          <Button variant="contained" onClick={submitIssue}>
-            确认领用
+          <Button variant="contained" onClick={submitIssue} disabled={issueBusy}>
+            {issueBusy ? '确认中…' : '确认领用'}
           </Button>
         </DialogActions>
       </Dialog>

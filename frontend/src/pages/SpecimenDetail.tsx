@@ -18,7 +18,10 @@ import { useProcedureStore } from '../stores/procedureStore';
 import { usePrepProgress } from '../hooks/usePrepProgress';
 import { SpecimenCard } from '../components/common/SpecimenCard';
 import { ProcedureTimeline } from '../components/common/ProcedureTimeline';
+import { ConflictPanel } from '../components/common/ConflictPanel';
 import { db } from '../utils/db';
+import { subscribeRemoteChange } from '../utils/syncBus';
+import { ConflictError, type VersionDiff } from '../utils/occ';
 import { PHOTO_STAGE_LABEL, type PrepPhoto } from '../types/photo';
 import { SPECIMEN_STATUSES, type SpecimenStatus } from '../types/specimen';
 
@@ -32,6 +35,8 @@ export default function SpecimenDetail() {
   const rollback = useProcedureStore((s) => s.rollback);
   const progress = usePrepProgress(id);
   const [photos, setPhotos] = useState<PrepPhoto[]>([]);
+  const [statusConflicts, setStatusConflicts] = useState<VersionDiff[]>([]);
+  const [statusBusy, setStatusBusy] = useState(false);
   const [toast, setToast] = useState('');
 
   const loadPhotos = useCallback(async () => {
@@ -44,6 +49,13 @@ export default function SpecimenDetail() {
   useEffect(() => {
     void loadPhotos();
   }, [loadPhotos]);
+
+  // 其它标签页新增影像 / 工序后，本页随之刷新
+  useEffect(() => subscribeRemoteChange((msg) => {
+    if (msg.scopes.includes('all') || msg.scopes.includes('photos') || msg.scopes.includes('procedures')) {
+      void loadPhotos();
+    }
+  }), [loadPhotos]);
 
   if (!specimen) {
     return (
@@ -59,12 +71,31 @@ export default function SpecimenDetail() {
   const beforePhotos = photos.filter((p) => p.stage === 'before');
   const afterPhotos = photos.filter((p) => p.stage === 'after');
 
+  const changeStatus = async (value: SpecimenStatus) => {
+    setStatusBusy(true);
+    setStatusConflicts([]);
+    try {
+      // 带上打开页面时（当前渲染）的标本版本
+      await setStatus(specimen, value);
+      setToast(`状态已更新为「${value}」`);
+    } catch (err) {
+      if (err instanceof ConflictError) {
+        setStatusConflicts(err.diffs);
+      } else {
+        setToast(err instanceof Error ? err.message : '状态更新失败');
+      }
+    } finally {
+      setStatusBusy(false);
+    }
+  };
+
   return (
     <Stack spacing={2}>
       <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap">
         <Typography variant="h5" fontWeight={700}>
           标本详情 · {specimen.specimenNo}
         </Typography>
+        <Chip size="small" variant="outlined" label={`记录版本 v${specimen.version}`} />
         <Box sx={{ flex: 1 }} />
         <Button
           variant="contained"
@@ -82,6 +113,16 @@ export default function SpecimenDetail() {
         </Button>
       </Stack>
 
+      {statusConflicts.length > 0 ? (
+        <ConflictPanel
+          diffs={statusConflicts}
+          testid="status-conflict"
+          retryLabel="用最新状态重试"
+          onRetryLatest={() => setStatusConflicts([])}
+          onDismiss={() => setStatusConflicts([])}
+        />
+      ) : null}
+
       <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '380px 1fr' }, gap: 2 }}>
         <Stack spacing={1.5}>
           <SpecimenCard item={specimen} />
@@ -93,11 +134,9 @@ export default function SpecimenDetail() {
               select
               size="small"
               fullWidth
+              disabled={statusBusy}
               value={specimen.status}
-              onChange={async (e) => {
-                await setStatus(specimen.id, e.target.value as SpecimenStatus);
-                setToast(`状态已更新为「${e.target.value}」`);
-              }}
+              onChange={(e) => changeStatus(e.target.value as SpecimenStatus)}
             >
               {SPECIMEN_STATUSES.map((s) => (
                 <MenuItem key={s} value={s}>
@@ -105,6 +144,9 @@ export default function SpecimenDetail() {
                 </MenuItem>
               ))}
             </TextField>
+            <Typography variant="caption" color="text.secondary">
+              切换状态会带回当前版本；别处刚改过时本次不覆盖。
+            </Typography>
           </Paper>
           <Paper variant="outlined" sx={{ p: 1.5 }}>
             <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
@@ -123,6 +165,9 @@ export default function SpecimenDetail() {
             </Typography>
             <Typography variant="body2" color="text.secondary">
               已回退节点 {progress.rolledback} 个 · 完成率 {progress.percent}%
+              {progress.lastConfirmedAt
+                ? ` · 最后确认 ${new Date(progress.lastConfirmedAt).toLocaleString('zh-CN')}`
+                : ''}
             </Typography>
           </Paper>
         </Stack>
@@ -130,17 +175,17 @@ export default function SpecimenDetail() {
         <Stack spacing={2}>
           <Paper variant="outlined" sx={{ p: 2 }}>
             <Typography variant="subtitle1" fontWeight={700} gutterBottom>
-              工序时间线
+              工序时间线（显示最后确认结果）
             </Typography>
             <ProcedureTimeline
               items={progress.list}
-              onFinish={async (pid) => {
-                await finish(pid);
+              onFinish={async (node) => {
+                await finish(node);
                 setToast('节点已完成');
               }}
-              onRollback={async (pid) => {
-                await rollback(pid);
-                setToast('节点已回退');
+              onRollback={async (node) => {
+                await rollback(node);
+                setToast('节点已回退，材料已按领用记录退回');
               }}
             />
           </Paper>

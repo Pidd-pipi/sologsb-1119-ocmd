@@ -21,20 +21,29 @@ export interface SupplyLot {
   shelfLifeMonths: number;
   /** 低量阈值 */
   lowThreshold: number;
-  /** 最近一次领用记录 */
+  /** 领用记录（最新在前） */
   issues: SupplyIssue[];
+  /**
+   * 乐观锁版本：领用 / 退料时必须带回打开页面时的版本，
+   * 被其他标签页改动后旧版本立即失效。
+   */
+  version: number;
 }
 
-/** 领用登记 */
+/** 领用登记（工序提交时随事务生成；回退工序时按此记录退回材料） */
 export interface SupplyIssue {
   id: string;
   qty: number;
   operator: string;
   specimenNo: string;
   issuedAt: number;
+  /** 关联工序：有该字段的领用可随工序回退而退料 */
+  procedureId?: string;
+  /** 退料时间；已退料的记录不再重复退回 */
+  returnedAt?: number;
 }
 
-export type SupplyLotDraft = Omit<SupplyLot, 'id' | 'issues'>;
+export type SupplyLotDraft = Omit<SupplyLot, 'id' | 'issues' | 'version'>;
 
 /** 是否低量 */
 export function isLowStock(lot: SupplyLot): boolean {

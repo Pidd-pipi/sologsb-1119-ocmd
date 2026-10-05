@@ -13,6 +13,8 @@ export interface PrepProgress {
   current: PrepProcedure | undefined;
   /** 跳号（应为空） */
   gaps: number[];
+  /** 最后一次确认（完成）时间，时间线/统计展示最后确认结果 */
+  lastConfirmedAt: number | undefined;
 }
 
 /**
@@ -31,6 +33,12 @@ export function usePrepProgress(specimenId: string | undefined): PrepProgress {
     const percent = list.length === 0 ? 0 : Math.round((done / list.length) * 100);
     const current = list.find((it) => it.state !== 'done');
     const gaps = findSeqGaps(list.map((it) => it.seq));
-    return { list, total: list.length, done, rolledback, percent, current, gaps };
+    const lastConfirmedAt = list.reduce<number | undefined>((latest, it) => {
+      if (it.state === 'done' && typeof it.finishedAt === 'number') {
+        return latest === undefined ? it.finishedAt : Math.max(latest, it.finishedAt);
+      }
+      return latest;
+    }, undefined);
+    return { list, total: list.length, done, rolledback, percent, current, gaps, lastConfirmedAt };
   }, [items, specimenId]);
 }

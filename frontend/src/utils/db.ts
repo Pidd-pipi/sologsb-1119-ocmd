@@ -7,7 +7,7 @@ import { makeSketchDataUrl } from '../types/photo';
 import { newId } from './id';
 
 /** 当前数据结构版本，写入 localStorage 便于回显 */
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const DB_NAME = 'gbfossilprep';
 export const LS_VERSION_KEY = 'gbfossilprep:db-version';
 
@@ -52,6 +52,37 @@ class FossilPrepDB extends Dexie {
           .modify((row: any) => {
             if (!row.issues) row.issues = [];
             if (row.lowThreshold === undefined) row.lowThreshold = 1;
+          });
+      });
+    // v3：乐观锁版本号——标本 / 工序 / 材料批次均带 version，
+    // 工序挂实际领用材料，领用记录可关联工序、可退料。索引不变。
+    this.version(3)
+      .stores({
+        specimens: 'id, specimenNo, taxon, locality, status, createdAt',
+        procedures: 'id, specimenId, seq, stepType, state, startedAt',
+        supplies: 'id, kind, lotNo, name, openedAt',
+        photos: 'id, specimenId, procedureId, stage, capturedAt',
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table('specimens')
+          .toCollection()
+          .modify((row: any) => {
+            if (typeof row.version !== 'number') row.version = 1;
+          });
+        await tx
+          .table('procedures')
+          .toCollection()
+          .modify((row: any) => {
+            if (typeof row.version !== 'number') row.version = 1;
+            if (!Array.isArray(row.materials)) row.materials = [];
+          });
+        await tx
+          .table('supplies')
+          .toCollection()
+          .modify((row: any) => {
+            if (typeof row.version !== 'number') row.version = 1;
+            if (!Array.isArray(row.issues)) row.issues = [];
           });
       });
   }
@@ -101,6 +132,7 @@ export async function ensureSeedData(): Promise<void> {
       storageBox: 'A 区 3 匣 2 格',
       status: '修复中',
       createdAt: now - 12 * day,
+      version: 1,
     },
     {
       id: specimenId2,
@@ -115,9 +147,11 @@ export async function ensureSeedData(): Promise<void> {
       storageBox: 'B 区 1 匣 4 格',
       status: '待清修',
       createdAt: now - 5 * day,
+      version: 1,
     },
   ];
 
+  const seedIssueId = newId('iss');
   const procedures: PrepProcedure[] = [
     {
       id: newId('prc'),
@@ -138,6 +172,17 @@ export async function ensureSeedData(): Promise<void> {
       startedAt: now - 10 * day,
       state: 'done',
       finishedAt: now - 10 * day + 145 * 60000,
+      materials: [
+        {
+          lotId: '__SEED_B72__',
+          lotNo: 'B72-20240312',
+          name: 'Paraloid B-72',
+          unit: '瓶',
+          qty: 1,
+          issueId: seedIssueId,
+        },
+      ],
+      version: 1,
     },
     {
       id: newId('prc'),
@@ -157,8 +202,14 @@ export async function ensureSeedData(): Promise<void> {
       operator: '林砚秋',
       startedAt: now - 6 * day,
       state: 'pending',
+      materials: [],
+      version: 1,
     },
   ];
+
+  // 让示范工序的领用记录与批次互相指向
+  const seedLotId = newId('sup');
+  procedures[0].materials[0].lotId = seedLotId;
 
   const photos: PrepPhoto[] = [
     {
@@ -185,7 +236,7 @@ export async function ensureSeedData(): Promise<void> {
 
   const supplies: SupplyLot[] = [
     {
-      id: newId('sup'),
+      id: seedLotId,
       name: 'Paraloid B-72',
       kind: '胶种',
       spec: '分析纯 500 g',
@@ -197,13 +248,15 @@ export async function ensureSeedData(): Promise<void> {
       lowThreshold: 2,
       issues: [
         {
-          id: newId('iss'),
+          id: seedIssueId,
           qty: 1,
           operator: '林砚秋',
           specimenNo: 'FP-2024-0031',
           issuedAt: now - 6 * day,
+          procedureId: procedures[0].id,
         },
       ],
+      version: 2,
     },
     {
       id: newId('sup'),
@@ -217,6 +270,7 @@ export async function ensureSeedData(): Promise<void> {
       shelfLifeMonths: 60,
       lowThreshold: 2,
       issues: [],
+      version: 1,
     },
     {
       id: newId('sup'),
@@ -230,6 +284,7 @@ export async function ensureSeedData(): Promise<void> {
       shelfLifeMonths: 120,
       lowThreshold: 5,
       issues: [],
+      version: 1,
     },
     {
       id: newId('sup'),
@@ -243,6 +298,7 @@ export async function ensureSeedData(): Promise<void> {
       shelfLifeMonths: 120,
       lowThreshold: 1,
       issues: [],
+      version: 1,
     },
   ];
 
