@@ -19,6 +19,8 @@ import { usePrepProgress } from '../hooks/usePrepProgress';
 import { SpecimenCard } from '../components/common/SpecimenCard';
 import { ProcedureTimeline } from '../components/common/ProcedureTimeline';
 import { db } from '../utils/db';
+import { subscribeChanges } from '../utils/changeBus';
+import { ConcurrencyError } from '../utils/concurrency';
 import { PHOTO_STAGE_LABEL, type PrepPhoto } from '../types/photo';
 import { SPECIMEN_STATUSES, type SpecimenStatus } from '../types/specimen';
 
@@ -33,6 +35,7 @@ export default function SpecimenDetail() {
   const progress = usePrepProgress(id);
   const [photos, setPhotos] = useState<PrepPhoto[]>([]);
   const [toast, setToast] = useState('');
+  const [statusBusy, setStatusBusy] = useState(false);
 
   const loadPhotos = useCallback(async () => {
     if (!id) return;
@@ -44,6 +47,13 @@ export default function SpecimenDetail() {
   useEffect(() => {
     void loadPhotos();
   }, [loadPhotos]);
+
+  // 其它标签页确认了工序/影像后，时间线由 store 刷新，影像在这里跟着刷新
+  useEffect(() => subscribeChanges((msg) => {
+    if (msg.tables.includes('photos') || msg.tables.includes('procedures')) {
+      void loadPhotos();
+    }
+  }), [loadPhotos]);
 
   if (!specimen) {
     return (
@@ -65,6 +75,7 @@ export default function SpecimenDetail() {
         <Typography variant="h5" fontWeight={700}>
           标本详情 · {specimen.specimenNo}
         </Typography>
+        <Chip size="small" variant="outlined" label={`记录版本 v${specimen.version}`} />
         <Box sx={{ flex: 1 }} />
         <Button
           variant="contained"
@@ -94,9 +105,24 @@ export default function SpecimenDetail() {
               size="small"
               fullWidth
               value={specimen.status}
+              disabled={statusBusy}
               onChange={async (e) => {
-                await setStatus(specimen.id, e.target.value as SpecimenStatus);
-                setToast(`状态已更新为「${e.target.value}」`);
+                const next = e.target.value as SpecimenStatus;
+                // 带上打开时的版本：别处先改了状态，本次旧版本立即失效、不覆盖
+                setStatusBusy(true);
+                try {
+                  await setStatus(specimen.id, next, specimen.version);
+                  setToast(`状态已更新为「${next}」`);
+                } catch (err) {
+                  if (err instanceof ConcurrencyError) {
+                    const c = err.conflicts[0];
+                    setToast(`状态已被别处改为「${c?.fields[0]?.actual ?? '未知'}」，未覆盖`);
+                  } else {
+                    setToast(err instanceof Error ? err.message : '状态更新失败');
+                  }
+                } finally {
+                  setStatusBusy(false);
+                }
               }}
             >
               {SPECIMEN_STATUSES.map((s) => (
@@ -105,6 +131,9 @@ export default function SpecimenDetail() {
                 </MenuItem>
               ))}
             </TextField>
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+              修改以当前版本 v{specimen.version} 确认，另一标签页先保存时这里会被拒绝并显示最新状态。
+            </Typography>
           </Paper>
           <Paper variant="outlined" sx={{ p: 1.5 }}>
             <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
@@ -134,13 +163,21 @@ export default function SpecimenDetail() {
             </Typography>
             <ProcedureTimeline
               items={progress.list}
-              onFinish={async (pid) => {
-                await finish(pid);
-                setToast('节点已完成');
+              onFinish={async (pid, expectedVersion) => {
+                try {
+                  await finish(pid, expectedVersion);
+                  setToast('节点已完成');
+                } catch (e) {
+                  setToast(e instanceof Error ? e.message : '完成失败');
+                }
               }}
-              onRollback={async (pid) => {
-                await rollback(pid);
-                setToast('节点已回退');
+              onRollback={async (pid, expectedVersion) => {
+                try {
+                  await rollback(pid, expectedVersion);
+                  setToast('节点已回退，领用材料已按记录退回');
+                } catch (e) {
+                  setToast(e instanceof Error ? e.message : '回退失败');
+                }
               }}
             />
           </Paper>

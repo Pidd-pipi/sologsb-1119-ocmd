@@ -32,6 +32,11 @@ export interface Specimen {
   storageBox: string;
   status: SpecimenStatus;
   createdAt: number;
+  /**
+   * 乐观锁版本：页面打开时记下该值，保存时原样带回；
+   * 任一标签页/窗口改了这条标本，版本 +1，旧版本提交立即失效。
+   */
+  version: number;
 }
 
-export type SpecimenDraft = Omit<Specimen, 'id' | 'createdAt'>;
+export type SpecimenDraft = Omit<Specimen, 'id' | 'createdAt' | 'version'>;

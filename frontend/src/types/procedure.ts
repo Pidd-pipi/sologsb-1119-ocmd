@@ -43,6 +43,27 @@ export const STEP_FIELD_MAP: Record<
 /** 工序节点状态 */
 export type ProcedureState = 'pending' | 'done' | 'rolledback';
 
+/**
+ * 工序实际领用的材料明细：录入工序时选择实际领用批次与数量，
+ * 保存时在同一事务里扣减对应批次库存；回退工序时据此退回。
+ */
+export interface MaterialUsage {
+  /** 对应 SupplyLot.id */
+  lotId: string;
+  /** 批号冗余，时间线展示不必反查批次 */
+  lotNo: string;
+  /** 材料名称冗余 */
+  name: string;
+  /** 单位冗余 */
+  unit: string;
+  /** 实际领用数量 */
+  qty: number;
+  /** 对应的领用记录 id（SupplyIssue.id），回退时据此冲销 */
+  issueId: string;
+  /** 回退时标记为已退回 */
+  returned?: boolean;
+}
+
 /** 修复工序 */
 export interface PrepProcedure {
   id: string;
@@ -72,6 +93,19 @@ export interface PrepProcedure {
   startedAt: number;
   state: ProcedureState;
   finishedAt?: number;
+  /** 实际领用材料（按批次追溯，回退时逐条退回） */
+  materials: MaterialUsage[];
+  /** 回退原因 */
+  rollbackReason?: string;
+  /** 乐观锁版本：完成/回退/编辑每次变动 +1，旧版本提交立即失效 */
+  version: number;
 }
 
-export type PrepProcedureDraft = Omit<PrepProcedure, 'id'>;
+/** 录入用草稿（id、库存写入后的冗余字段由系统补齐） */
+export type PrepProcedureDraft = Omit<
+  PrepProcedure,
+  'id' | 'version' | 'materials'
+> & {
+  /** 录入时选择的实际领用批次与数量 */
+  materials: Array<Pick<MaterialUsage, 'lotId' | 'qty'>>;
+};

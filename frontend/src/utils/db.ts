@@ -7,7 +7,7 @@ import { makeSketchDataUrl } from '../types/photo';
 import { newId } from './id';
 
 /** 当前数据结构版本，写入 localStorage 便于回显 */
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 export const DB_NAME = 'gbfossilprep';
 export const LS_VERSION_KEY = 'gbfossilprep:db-version';
 
@@ -54,6 +54,40 @@ class FossilPrepDB extends Dexie {
             if (row.lowThreshold === undefined) row.lowThreshold = 1;
           });
       });
+    // v3：标本/批次/工序增加乐观锁版本号；工序挂实际领用材料；领用记录可关联工序并支持回退冲销
+    this.version(3)
+      .stores({
+        specimens: 'id, specimenNo, taxon, locality, status, createdAt, version',
+        procedures: 'id, specimenId, seq, stepType, state, startedAt, version',
+        supplies: 'id, kind, lotNo, name, openedAt, version',
+        photos: 'id, specimenId, procedureId, stage, capturedAt',
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table('specimens')
+          .toCollection()
+          .modify((row: any) => {
+            if (row.version === undefined) row.version = 1;
+          });
+        await tx
+          .table('supplies')
+          .toCollection()
+          .modify((row: any) => {
+            if (row.version === undefined) row.version = 1;
+            if (Array.isArray(row.issues)) {
+              row.issues.forEach((iss: any) => {
+                if (!iss.kind) iss.kind = 'manual';
+              });
+            }
+          });
+        await tx
+          .table('procedures')
+          .toCollection()
+          .modify((row: any) => {
+            if (row.version === undefined) row.version = 1;
+            if (!Array.isArray(row.materials)) row.materials = [];
+          });
+      });
   }
 }
 
@@ -86,6 +120,14 @@ export async function ensureSeedData(): Promise<void> {
   const day = 24 * 3600 * 1000;
   const specimenId = newId('spm');
   const specimenId2 = newId('spm');
+  const proc1Id = newId('prc');
+  const proc2Id = newId('prc');
+  const lotB72Id = newId('sup');
+  const lotSicId = newId('sup');
+  const lotNeedleId = newId('sup');
+  const lotUsId = newId('sup');
+  const issueB72Id = newId('iss');
+  const issueSicId = newId('iss');
 
   const specimens: Specimen[] = [
     {
@@ -101,6 +143,7 @@ export async function ensureSeedData(): Promise<void> {
       storageBox: 'A 区 3 匣 2 格',
       status: '修复中',
       createdAt: now - 12 * day,
+      version: 1,
     },
     {
       id: specimenId2,
@@ -115,12 +158,13 @@ export async function ensureSeedData(): Promise<void> {
       storageBox: 'B 区 1 匣 4 格',
       status: '待清修',
       createdAt: now - 5 * day,
+      version: 1,
     },
   ];
 
   const procedures: PrepProcedure[] = [
     {
-      id: newId('prc'),
+      id: proc1Id,
       specimenId,
       stepType: '清修',
       nodeName: '左侧肩胛区粗清',
@@ -138,9 +182,20 @@ export async function ensureSeedData(): Promise<void> {
       startedAt: now - 10 * day,
       state: 'done',
       finishedAt: now - 10 * day + 145 * 60000,
+      materials: [
+        {
+          lotId: lotSicId,
+          lotNo: 'SIC-800-2401',
+          name: '碳化硅磨料',
+          unit: '袋',
+          qty: 1,
+          issueId: issueSicId,
+        },
+      ],
+      version: 1,
     },
     {
-      id: newId('prc'),
+      id: proc2Id,
       specimenId,
       stepType: '加固',
       nodeName: '围岩裂隙渗透加固',
@@ -157,6 +212,17 @@ export async function ensureSeedData(): Promise<void> {
       operator: '林砚秋',
       startedAt: now - 6 * day,
       state: 'pending',
+      materials: [
+        {
+          lotId: lotB72Id,
+          lotNo: 'B72-20240312',
+          name: 'Paraloid B-72',
+          unit: '瓶',
+          qty: 1,
+          issueId: issueB72Id,
+        },
+      ],
+      version: 1,
     },
   ];
 
@@ -164,7 +230,7 @@ export async function ensureSeedData(): Promise<void> {
     {
       id: newId('pho'),
       specimenId,
-      procedureId: procedures[0].id,
+      procedureId: proc1Id,
       stage: 'before',
       caption: '清修前 · 左侧肩胛区围岩包裹',
       dataUrl: makeSketchDataUrl('清修前 · FP-2024-0031', '#6b5844'),
@@ -173,7 +239,7 @@ export async function ensureSeedData(): Promise<void> {
     {
       id: newId('pho'),
       specimenId,
-      procedureId: procedures[0].id,
+      procedureId: proc1Id,
       stage: 'after',
       caption: '清修后 · 肩胛骨轮廓显露',
       dataUrl: makeSketchDataUrl('清修后 · FP-2024-0031', '#3f5a4a'),
@@ -185,41 +251,57 @@ export async function ensureSeedData(): Promise<void> {
 
   const supplies: SupplyLot[] = [
     {
-      id: newId('sup'),
+      id: lotB72Id,
       name: 'Paraloid B-72',
       kind: '胶种',
       spec: '分析纯 500 g',
       lotNo: 'B72-20240312',
-      qty: 4,
+      qty: 3,
       unit: '瓶',
       openedAt: now - 40 * day,
       shelfLifeMonths: 36,
       lowThreshold: 2,
+      version: 1,
       issues: [
         {
-          id: newId('iss'),
+          id: issueB72Id,
           qty: 1,
           operator: '林砚秋',
           specimenNo: 'FP-2024-0031',
+          specimenId,
+          procedureId: proc2Id,
+          kind: 'procedure',
           issuedAt: now - 6 * day,
         },
       ],
     },
     {
-      id: newId('sup'),
+      id: lotSicId,
       name: '碳化硅磨料',
       kind: '磨料',
       spec: '800 目 1 kg',
       lotNo: 'SIC-800-2401',
-      qty: 1,
+      qty: 0,
       unit: '袋',
       openedAt: now - 60 * day,
       shelfLifeMonths: 60,
       lowThreshold: 2,
-      issues: [],
+      version: 1,
+      issues: [
+        {
+          id: issueSicId,
+          qty: 1,
+          operator: '林砚秋',
+          specimenNo: 'FP-2024-0031',
+          specimenId,
+          procedureId: proc1Id,
+          kind: 'procedure',
+          issuedAt: now - 10 * day,
+        },
+      ],
     },
     {
-      id: newId('sup'),
+      id: lotNeedleId,
       name: '气动笔针头',
       kind: '耗材',
       spec: '钨钢 2.3 mm',
@@ -230,9 +312,10 @@ export async function ensureSeedData(): Promise<void> {
       shelfLifeMonths: 120,
       lowThreshold: 5,
       issues: [],
+      version: 1,
     },
     {
-      id: newId('sup'),
+      id: lotUsId,
       name: '超声波清洗机',
       kind: '工具',
       spec: '6 L / 40 kHz',
@@ -243,6 +326,7 @@ export async function ensureSeedData(): Promise<void> {
       shelfLifeMonths: 120,
       lowThreshold: 1,
       issues: [],
+      version: 1,
     },
   ];
 

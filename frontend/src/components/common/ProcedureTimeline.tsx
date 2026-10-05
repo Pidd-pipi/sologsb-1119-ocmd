@@ -13,12 +13,14 @@ import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import RadioButtonUncheckedIcon from '@mui/icons-material/RadioButtonUnchecked';
 import UndoIcon from '@mui/icons-material/Undo';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import UndoableSupplyIcon from '@mui/icons-material/Inventory2';
 import type { PrepProcedure } from '../../types/procedure';
 
 export interface ProcedureTimelineProps {
   items: PrepProcedure[];
-  onFinish?: (id: string) => void;
-  onRollback?: (id: string) => void;
+  /** 完成/回退回调的第二参为节点当前版本，旧版本会被后端（本地事务）拒绝 */
+  onFinish?: (id: string, expectedVersion: number) => void;
+  onRollback?: (id: string, expectedVersion: number) => void;
   onOpenPhoto?: (procedureId: string) => void;
 }
 
@@ -31,7 +33,7 @@ function fmtTime(ts?: number): string {
 
 /**
  * 纵向工序节点流：步骤图标、状态、耗时、环境参数折叠区。
- * 被标本详情页、工序录入页消费。
+ * 被标本详情页、工序录入页消费；时间线始终按 store 中最后确认的结果渲染。
  */
 export function ProcedureTimeline({ items, onFinish, onRollback, onOpenPhoto }: ProcedureTimelineProps) {
   const [expanded, setExpanded] = useState<string | null>(items[0]?.id ?? null);
@@ -51,6 +53,8 @@ export function ProcedureTimeline({ items, onFinish, onRollback, onOpenPhoto }: 
       {items.map((node, index) => {
         const isDone = node.state === 'done';
         const open = expanded === node.id;
+        const activeMaterials = node.materials.filter((m) => !m.returned);
+        const returnedMaterials = node.materials.filter((m) => m.returned);
         return (
           <Box key={node.id} sx={{ display: 'flex', gap: 1.5 }}>
             <Stack alignItems="center" sx={{ pt: 0.5 }}>
@@ -74,17 +78,39 @@ export function ProcedureTimeline({ items, onFinish, onRollback, onOpenPhoto }: 
                   label={node.state === 'done' ? '已完成' : node.state === 'rolledback' ? '已回退' : '待办'}
                   color={isDone ? 'success' : node.state === 'rolledback' ? 'error' : 'default'}
                 />
+                {node.materials.length > 0 ? (
+                  <Tooltip
+                    title={
+                      activeMaterials.length > 0
+                        ? `领用 ${activeMaterials.map((m) => `${m.lotNo}×${m.qty}`).join('、')}`
+                        : '领用材料已全部随回退退回'
+                    }
+                  >
+                    <Chip
+                      size="small"
+                      icon={<UndoableSupplyIcon style={{ fontSize: 14 }} />}
+                      variant="outlined"
+                      label={`领用 ${activeMaterials.reduce((s, m) => s + m.qty, 0)}${returnedMaterials.length > 0 ? ` · 退 ${returnedMaterials.reduce((s, m) => s + m.qty, 0)}` : ''}`}
+                      color={node.state === 'rolledback' ? 'warning' : 'default'}
+                    />
+                  </Tooltip>
+                ) : null}
                 <Typography variant="caption" color="text.secondary">
                   耗时 {node.durationMin} min · 责任人 {node.operator}
                 </Typography>
                 <Box sx={{ flex: 1 }} />
                 {!isDone && onFinish ? (
-                  <Button size="small" variant="contained" onClick={() => onFinish(node.id)}>
+                  <Button size="small" variant="contained" onClick={() => onFinish(node.id, node.version)}>
                     完成节点
                   </Button>
                 ) : null}
                 {isDone && onRollback ? (
-                  <Button size="small" color="warning" startIcon={<UndoIcon />} onClick={() => onRollback(node.id)}>
+                  <Button
+                    size="small"
+                    color="warning"
+                    startIcon={<UndoIcon />}
+                    onClick={() => onRollback(node.id, node.version)}
+                  >
                     回退节点
                   </Button>
                 ) : null}
@@ -97,6 +123,11 @@ export function ProcedureTimeline({ items, onFinish, onRollback, onOpenPhoto }: 
                   </IconButton>
                 </Tooltip>
               </Stack>
+              {node.state === 'rolledback' && node.rollbackReason ? (
+                <Typography variant="caption" color="error.main" sx={{ display: 'block', mt: 0.5 }}>
+                  回退原因：{node.rollbackReason}
+                </Typography>
+              ) : null}
               <Collapse in={open} unmountOnExit>
                 <Divider sx={{ my: 1 }} />
                 <Stack direction="row" spacing={2} flexWrap="wrap" rowGap={0.5}>
@@ -114,12 +145,30 @@ export function ProcedureTimeline({ items, onFinish, onRollback, onOpenPhoto }: 
                   <Typography variant="body2">
                     影像：前 {node.photoBeforeIds.length} 张 / 后 {node.photoAfterIds.length} 张
                   </Typography>
-                  {onOpenPhoto ? (
-                    <Button size="small" onClick={() => onOpenPhoto(node.id)}>
-                      查看对照
-                    </Button>
-                  ) : null}
                 </Stack>
+                {node.materials.length > 0 ? (
+                  <Box sx={{ mt: 1 }}>
+                    <Typography variant="body2" fontWeight={700}>
+                      实际领用批次
+                    </Typography>
+                    <Stack direction="row" spacing={1} flexWrap="wrap" sx={{ mt: 0.5 }}>
+                      {node.materials.map((m) => (
+                        <Chip
+                          key={m.issueId}
+                          size="small"
+                          variant="outlined"
+                          color={m.returned ? 'warning' : 'default'}
+                          label={`${m.name} · ${m.lotNo} · ${m.qty} ${m.unit}${m.returned ? '（已退回）' : ''}`}
+                        />
+                      ))}
+                    </Stack>
+                  </Box>
+                ) : null}
+                {onOpenPhoto ? (
+                  <Button size="small" onClick={() => onOpenPhoto(node.id)} sx={{ mt: 0.5 }}>
+                    查看对照
+                  </Button>
+                ) : null}
               </Collapse>
             </Paper>
           </Box>
